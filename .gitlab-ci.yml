@@ -1,0 +1,78 @@
+stages:
+  - compile
+  - analysis
+  - build-image
+  - push
+  - deploy
+
+variables:
+  NEXUS_HOST: "repo.example.net:8082"
+  NEXUS_REGISTRY: "repo.example.net:5005"
+  NEXUS_REPO: "example-docker"
+  IMAGE_NAME: "$NEXUS_REGISTRY/$NEXUS_REPO/$CI_PROJECT_NAME"
+  NUGET_PACKAGES: "$CI_PROJECT_DIR/.nuget_packages"
+
+cache:
+  key: "dotnet-cache-$CI_COMMIT_REF_SLUG"
+  paths:
+    - .nuget_packages/
+    - "**/bin/"
+    - "**/obj/"
+  policy: pull
+
+compile-app:
+  stage: compile
+  image: mcr.microsoft.com/dotnet/sdk:9.0
+  cache:
+    key: "dotnet-cache-$CI_COMMIT_REF_SLUG"
+    paths:
+      - .nuget_packages/
+      - "**/bin/"
+      - "**/obj/"
+    policy: pull-push
+  script:
+    - dotnet restore --packages $NUGET_PACKAGES
+    - dotnet publish -c Release -o ./publish --no-restore
+  artifacts:
+    paths:
+      - publish/
+    expire_in: 1 hour
+
+build-docker-image:
+  stage: build-image
+  needs: ["compile-app"]
+  image: docker:latest
+  services:
+    - docker:dind
+  cache: []
+  script:
+    - docker build -t $IMAGE_NAME:$CI_COMMIT_SHA -t $IMAGE_NAME:latest -f Dockerfile .
+    - docker save $IMAGE_NAME:$CI_COMMIT_SHA -o image.tar
+    - docker save $IMAGE_NAME:latest -o image_latest.tar
+  artifacts:
+    paths:
+      - image.tar
+      - image_latest.tar
+    expire_in: 1 hour
+
+push-docker-image:
+  stage: push
+  needs: ["build-docker-image"]
+  image: docker:latest
+  services:
+    - docker:dind
+  cache: []
+  script:
+    - docker load -i image.tar
+    - docker load -i image_latest.tar
+    # اگر ریجستری نیاز به لاگین دارد:
+    # - echo "$NEXUS_PASSWORD" | docker login $NEXUS_REGISTRY -u "$NEXUS_USER" --password-stdin
+    - docker push $IMAGE_NAME:$CI_COMMIT_SHA
+    - docker push $IMAGE_NAME:latest
+
+deploy-app:
+  stage: deploy
+  needs: ["push-docker-image"]
+  image: alpine:latest
+  script:
+    - echo "Deploying version $CI_COMMIT_SHA to production/staging server..."
